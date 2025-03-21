@@ -1,12 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.auth.jwt import get_current_active_user
 from app.schemas.character import CharacterCreate, CharacterResponse, CharacterUpdate
-from app.database.connection import supabase
+from app.database.connection import get_supabase_client
 from app.utils.character_defaults import get_default_stats, get_default_abilities, get_starter_inventory
 from app.utils.ai_responses import get_character_response
 from app.services.character_progression import add_experience, calculate_xp_reward
 from typing import List, Dict, Any
 from uuid import UUID
+import logging
+import datetime
+import uuid
+
+logger = logging.getLogger("app.api.characters")
 
 router = APIRouter(prefix="/characters", tags=["characters"])
 
@@ -16,7 +21,12 @@ async def create_character(
     current_user = Depends(get_current_active_user)
 ):
     """Create a new AI character"""
-    if not supabase:
+    logger.info(f"Creating character {character_data.name} for user {current_user['id']}")
+    
+    # Always try to re-initialize the connection
+    client = get_supabase_client()
+    
+    if not client:
         raise HTTPException(status_code=503, detail="Database connection not available")
     
     # Get default stats, abilities and inventory based on character class
@@ -25,61 +35,90 @@ async def create_character(
     starter_inventory = get_starter_inventory(character_data.character_class)
     
     # Prepare character data
+    now = datetime.datetime.utcnow()
+    character_id = str(uuid.uuid4())
+    user_id = current_user["id"]
+    
     new_character = {
+        "id": character_id,
+        "user_id": user_id,
         "name": character_data.name,
         "character_class": character_data.character_class,
         "backstory": character_data.backstory,
-        "personality": character_data.personality,
-        "stats": default_stats,
+        "attributes": character_data.attributes or default_stats,
+        "appearance": character_data.appearance or {},
         "inventory": starter_inventory,
         "level": 1,
         "health": 100,
         "abilities": default_abilities,
-        "created_by": current_user["id"],
-        "experience": 0
+        "experience": 0,
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat()
     }
     
     # Insert character into database
-    result = supabase.table("characters").insert(new_character).execute()
-    if not result.data:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create character"
-        )
+    result = client.table("characters").insert(new_character)
     
-    created_character = result.data[0]
+    # Create a response object
+    created_character = {
+        "id": UUID(character_id),
+        "user_id": UUID(user_id),
+        "name": character_data.name,
+        "character_class": character_data.character_class,
+        "backstory": character_data.backstory or "",
+        "attributes": character_data.attributes or default_stats,
+        "appearance": character_data.appearance or {},
+        "level": 1,
+        "experience": 0,
+        "created_at": now,
+        "updated_at": now
+    }
+    
     return created_character
 
 @router.get("", response_model=List[CharacterResponse])
 async def get_user_characters(current_user = Depends(get_current_active_user)):
     """Get all characters created by current user"""
-    if not supabase:
+    logger.info(f"Getting characters for user {current_user['id']}")
+    
+    # Always try to re-initialize the connection
+    client = get_supabase_client()
+    
+    if not client:
         raise HTTPException(status_code=503, detail="Database connection not available")
     
-    characters = supabase.table("characters").select("*").eq("created_by", current_user["id"]).execute()
+    characters = client.table("characters").select("*").eq("user_id", current_user["id"]).execute()
     return characters.data
 
 @router.get("/{character_id}", response_model=CharacterResponse)
 async def get_character(character_id: str, current_user = Depends(get_current_active_user)):
-    """Get a specific character by ID"""
-    if not supabase:
+    """Get a character by ID"""
+    logger.info(f"Getting character {character_id} for user {current_user['id']}")
+    
+    # Always try to re-initialize the connection
+    client = get_supabase_client()
+    
+    if not client:
         raise HTTPException(status_code=503, detail="Database connection not available")
     
-    character = supabase.table("characters").select("*").eq("id", character_id).execute()
-    if not character.data:
+    result = client.table("characters").select("*").eq("id", character_id).execute()
+    
+    if not result.data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Character not found"
         )
     
-    # Check if user has permission to access this character
-    if character.data[0]["created_by"] != current_user["id"] and current_user.get("role") != "admin":
+    character = result.data[0]
+    
+    # Check if the character belongs to the current user
+    if character["user_id"] != current_user["id"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to access this character"
         )
     
-    return character.data[0]
+    return character
 
 @router.put("/{character_id}", response_model=CharacterResponse)
 async def update_character(
@@ -88,18 +127,23 @@ async def update_character(
     current_user = Depends(get_current_active_user)
 ):
     """Update a character"""
-    if not supabase:
+    logger.info(f"Updating character {character_id} for user {current_user['id']}")
+    
+    # Always try to re-initialize the connection
+    client = get_supabase_client()
+    
+    if not client:
         raise HTTPException(status_code=503, detail="Database connection not available")
     
     # Check if character exists and user has permission
-    character = supabase.table("characters").select("*").eq("id", character_id).execute()
+    character = client.table("characters").select("*").eq("id", character_id).execute()
     if not character.data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Character not found"
         )
     
-    if character.data[0]["created_by"] != current_user["id"] and current_user.get("role") != "admin":
+    if character.data[0]["user_id"] != current_user["id"] and current_user.get("role") != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to update this character"
@@ -107,7 +151,7 @@ async def update_character(
     
     # Update character in database
     update_data = character_update.dict(exclude_unset=True)
-    result = supabase.table("characters").update(update_data).eq("id", character_id).execute()
+    result = client.table("characters").update(update_data).eq("id", character_id).execute()
     if not result.data:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -124,11 +168,16 @@ async def interact_with_character(
     current_user = Depends(get_current_active_user)
 ):
     """Interact with a character via AI"""
-    if not supabase:
+    logger.info(f"Interacting with character {character_id} for user {current_user['id']}")
+    
+    # Always try to re-initialize the connection
+    client = get_supabase_client()
+    
+    if not client:
         raise HTTPException(status_code=503, detail="Database connection not available")
     
     # Check if character exists
-    character = supabase.table("characters").select("*").eq("id", character_id).execute()
+    character = client.table("characters").select("*").eq("id", character_id).execute()
     if not character.data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -166,10 +215,18 @@ async def add_character_experience(
     }
     ```
     """
+    logger.info(f"Adding experience to character {character_id} for user {current_user['id']}")
+    
     user_id = current_user.get("id")
     
+    # Always try to re-initialize the connection
+    client = get_supabase_client()
+    
+    if not client:
+        raise HTTPException(status_code=503, detail="Database connection not available")
+    
     # Check if character exists and belongs to user
-    result = supabase.table("characters").select("*").eq("id", str(character_id)).execute()
+    result = client.table("characters").select("*").eq("id", str(character_id)).execute()
     
     if not result.data:
         raise HTTPException(
@@ -180,7 +237,7 @@ async def add_character_experience(
     character = result.data[0]
     
     # Verify ownership
-    if character.get("created_by") != user_id and current_user.get("role") != "admin":
+    if character.get("user_id") != user_id and current_user.get("role") != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have permission to update this character"
@@ -225,10 +282,18 @@ async def add_action_reward(
     }
     ```
     """
+    logger.info(f"Awarding XP for action on character {character_id} for user {current_user['id']}")
+    
     user_id = current_user.get("id")
     
+    # Always try to re-initialize the connection
+    client = get_supabase_client()
+    
+    if not client:
+        raise HTTPException(status_code=503, detail="Database connection not available")
+    
     # Check if character exists and belongs to user
-    result = supabase.table("characters").select("*").eq("id", str(character_id)).execute()
+    result = client.table("characters").select("*").eq("id", str(character_id)).execute()
     
     if not result.data:
         raise HTTPException(
@@ -239,7 +304,7 @@ async def add_action_reward(
     character = result.data[0]
     
     # Verify ownership
-    if character.get("created_by") != user_id and current_user.get("role") != "admin":
+    if character.get("user_id") != user_id and current_user.get("role") != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have permission to update this character"
@@ -282,10 +347,18 @@ async def add_action_reward(
 @router.get("/{character_id}/stats", response_model=Dict[str, Any])
 async def get_character_stats(character_id: UUID, current_user = Depends(get_current_active_user)):
     """Get detailed stats for a character"""
+    logger.info(f"Getting stats for character {character_id} for user {current_user['id']}")
+    
     user_id = current_user.get("id")
     
+    # Always try to re-initialize the connection
+    client = get_supabase_client()
+    
+    if not client:
+        raise HTTPException(status_code=503, detail="Database connection not available")
+    
     # Check if character exists and belongs to user
-    result = supabase.table("characters").select("*").eq("id", str(character_id)).execute()
+    result = client.table("characters").select("*").eq("id", str(character_id)).execute()
     
     if not result.data:
         raise HTTPException(
@@ -296,7 +369,7 @@ async def get_character_stats(character_id: UUID, current_user = Depends(get_cur
     character = result.data[0]
     
     # Verify ownership or admin status
-    if character.get("created_by") != user_id and current_user.get("role") != "admin":
+    if character.get("user_id") != user_id and current_user.get("role") != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have permission to access this character"

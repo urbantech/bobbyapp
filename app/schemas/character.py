@@ -21,39 +21,36 @@ class CharacterClass(str, Enum):
 class CharacterBase(BaseModel):
     """Base schema for characters"""
     name: str = Field(..., min_length=2, max_length=50)
-    character_class: CharacterClass
+    character_class: str
     backstory: Optional[str] = None
-    personality: Optional[Dict[str, Any]] = None
 
 
 class CharacterCreate(CharacterBase):
     """Schema for creating a new character"""
-    stats: Optional[Dict[str, Any]] = None
-    inventory: Optional[List[Dict[str, Any]]] = None
-    abilities: Optional[Dict[str, Any]] = None
+    attributes: Optional[Dict[str, Any]] = None
+    appearance: Optional[Dict[str, Any]] = None
 
 
 class CharacterUpdate(BaseModel):
     """Schema for updating a character"""
     name: Optional[str] = Field(None, min_length=2, max_length=50)
     backstory: Optional[str] = None
-    personality: Optional[Dict[str, Any]] = None
-    inventory: Optional[List[Dict[str, Any]]] = None
-    health: Optional[int] = Field(None, ge=0)
+    attributes: Optional[Dict[str, Any]] = None
+    appearance: Optional[Dict[str, Any]] = None
+    level: Optional[int] = Field(None, ge=1)
+    experience: Optional[int] = Field(None, ge=0)
 
 
 class CharacterResponse(CharacterBase):
     """Schema for character response"""
     id: UUID
-    stats: Dict[str, Any]
-    inventory: List[Dict[str, Any]]
+    user_id: UUID
+    attributes: Dict[str, Any]
+    appearance: Optional[Dict[str, Any]] = None
     level: int = 1
     experience: int = 0
-    health: int
-    abilities: Dict[str, Any]
-    created_by: UUID
     created_at: datetime
-    updated_at: Optional[datetime] = None
+    updated_at: datetime
 
 
 class CharacterList(BaseModel):
@@ -102,6 +99,6 @@ class CharacterStats(BaseModel):
     name: str
     level: int
     experience: int
-    character_class: CharacterClass
+    character_class: str
     stats: Dict[str, Any]
     abilities: Dict[str, Any]
