@@ -3,8 +3,10 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.auth.jwt import create_access_token
 import os
-import json
 from unittest.mock import patch, MagicMock
+import json
+from unittest.mock import AsyncMock
+from datetime import datetime
 
 client = TestClient(app)
 
@@ -30,36 +32,100 @@ def mock_get_current_active_user():
 # Mock Supabase for testing
 @pytest.fixture(autouse=True)
 def mock_supabase():
-    # Create a mock for the supabase module
-    mock_result = MagicMock()
-    mock_result.data = []
+    # Mock data
+    test_user = {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "username": "testuser",
+        "email": "test@example.com",
+        "password_hash": "$2b$12$QUoJVvCsEYo6SgPVqXjTQuHQqZvscbMc7iqM9i8J7b7dTYscUgsIi",  # Hash for "password"
+        "created_at": "2023-01-01T00:00:00",
+        "subscription_level": "free",
+    }
     
-    mock_table = MagicMock()
-    mock_table.select.return_value = mock_table
-    mock_table.eq.return_value = mock_table
-    mock_table.execute.return_value = mock_result
-    mock_table.insert.return_value = mock_table
-    mock_table.update.return_value = mock_table
-    mock_table.delete.return_value = mock_table
+    # Create a mock for the supabase client
+    mock_supabase = MagicMock()
     
+    # Set up mock for user table
+    user_table = MagicMock()
+    
+    # For user registration
+    mock_insert_result = MagicMock()
+    new_user = {
+        "id": "660e8400-e29b-41d4-a716-446655440000",
+        "username": "newuser",
+        "email": "new_user@example.com",
+        "created_at": "2023-01-02T00:00:00",
+        "subscription_level": "free"
+    }
+    mock_insert_result.data = [new_user]
+    
+    user_table.insert.return_value = MagicMock()
+    user_table.insert().execute.return_value = mock_insert_result
+    
+    # For email check during registration
+    mock_empty_result = MagicMock()
+    mock_empty_result.data = []
+    
+    # For login authentication
+    mock_login_result = MagicMock()
+    mock_login_result.data = [test_user]
+    
+    # Configure select with dynamic response based on query parameters
+    def select_execute_side_effect(*args, **kwargs):
+        # The actual implementation would check the chain of calls
+        # For simplicity, we'll just return the appropriate mocked response
+        return mock_login_result
+    
+    select_mock = MagicMock()
+    select_mock.execute.side_effect = select_execute_side_effect
+    
+    # Setup for various select chains
+    user_table.select.return_value = MagicMock()
+    user_table.select().eq.return_value = select_mock
+    
+    # Special case for registration email check
+    registration_check = MagicMock()
+    registration_check.execute.return_value = mock_empty_result
+    
+    def eq_side_effect(field, value):
+        if field == "email" and value == "new_user@example.com":
+            # For registration, return empty result to allow registration
+            return registration_check
+        # For login, return mock with test user
+        return select_mock
+    
+    user_table.select().eq.side_effect = eq_side_effect
+    
+    # Mock storage
     mock_storage = MagicMock()
     mock_storage.from_.return_value = mock_storage
     mock_storage.upload.return_value = "mock_file_path"
     mock_storage.get_public_url.return_value = "https://example.com/mock_file_path"
     
-    mock_supabase = MagicMock()
-    mock_supabase.table.return_value = mock_table
     mock_supabase.storage = mock_storage
     
+    # Configure the mock to return different tables
+    def table_side_effect(name):
+        if name == "users":
+            return user_table
+        return MagicMock()
+    
+    mock_supabase.table.side_effect = table_side_effect
+    
+    # Apply the mock to all modules that use supabase
     with patch("app.database.connection.supabase", mock_supabase):
-        with patch("app.api.auth.supabase", mock_supabase):
-            with patch("app.api.characters.supabase", mock_supabase):
-                with patch("app.api.conversations.supabase", mock_supabase):
-                    with patch("app.api.dice.supabase", mock_supabase):
-                        with patch("app.api.quests.supabase", mock_supabase):
-                            with patch("app.api.multimodal.supabase", mock_supabase):
-                                with patch("app.services.conversation_service.supabase", mock_supabase):
-                                    yield mock_supabase
+        with patch("app.auth.jwt.supabase", mock_supabase):
+            with patch("app.api.auth.supabase", mock_supabase):
+                with patch("app.api.characters.supabase", mock_supabase):
+                    with patch("app.api.conversations.supabase", mock_supabase):
+                        with patch("app.api.dice.supabase", mock_supabase):
+                            with patch("app.api.quests.supabase", mock_supabase):
+                                with patch("app.api.multimodal.supabase", mock_supabase):
+                                    with patch("app.services.conversation_service.supabase", mock_supabase):
+                                        with patch("app.services.inventory_service.supabase", mock_supabase):
+                                            with patch("app.services.notification_service.supabase", mock_supabase):
+                                                with patch("app.auth.jwt.verify_password", return_value=True):
+                                                    yield mock_supabase
 
 # Test root endpoint
 def test_root():
@@ -86,8 +152,24 @@ def test_register_user():
     assert response.status_code == 201
 
 def test_login_user():
+    # Generate a unique email for this test run
+    unique_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    test_email = f"test{unique_id}@example.com"
+    
+    # First register a user
+    register_data = {
+        "email": test_email,
+        "password": "password",
+        "username": f"testuser{unique_id}"
+    }
+    
+    # Register the user
+    register_response = client.post(f"{os.getenv('API_PREFIX', '/api/v1')}/auth/register", json=register_data)
+    assert register_response.status_code == 201
+    
+    # Login with the registered user
     login_data = {
-        "email": "test@example.com",
+        "username": test_email,  # OAuth2 expects username field for email
         "password": "password"
     }
     
